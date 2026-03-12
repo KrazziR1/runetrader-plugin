@@ -1,13 +1,13 @@
-package com.example;
+package gg.runetrader;
 
 import net.runelite.client.RuneLite;
 import net.runelite.client.externalplugins.ExternalPluginManager;
 
-public class ExamplePluginTest
+public class RuneTraderPluginTest
 {
 	public static void main(String[] args) throws Exception
 	{
-		ExternalPluginManager.loadBuiltin(ExamplePlugin.class);
+		ExternalPluginManager.loadBuiltin(RuneTraderPlugin.class);
 		RuneLite.main(args);
 	}
 }

@@ -10,7 +10,7 @@ public interface RuneTraderConfig extends Config
 	@ConfigItem(
 		keyName = "apiKey",
 		name = "API Key",
-		description = "Your RuneTrader.gg API key. Generate one at runetrader.gg → Settings.",
+		description = "Your RuneTrader.gg API key. Generate one at runetrader.gg in Settings.",
 		secret = true,
 		position = 1
 	)

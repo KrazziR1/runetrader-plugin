@@ -21,9 +21,12 @@ import okhttp3.Response;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
@@ -36,6 +39,9 @@ public class RuneTraderPlugin extends Plugin
 {
 	private static final String SYNC_URL = "https://www.runetrader.gg/api/sync-offers";
 	private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
+	private static final int MAX_QUEUE_SIZE = 50;
+	// Debounce: coalesce rapid partial-fill ticks into one request per slot
+	private static final long DEBOUNCE_MS = 1500;
 
 	@Inject
 	private Client client;
@@ -46,9 +52,13 @@ public class RuneTraderPlugin extends Plugin
 	@Inject
 	private OkHttpClient okHttpClient;
 
-	// Failed requests are queued here and retried on reconnect
-	private final List<String> failedQueue = new ArrayList<>();
+	// One pending payload per slot, flushed after DEBOUNCE_MS of inactivity
+	private final Map<Integer, String> pendingPayloads = new HashMap<>();
+	private final Map<Integer, ScheduledFuture<?>> debounceTimers = new HashMap<>();
 	private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+
+	// Failed requests queued for retry on reconnect (capped to avoid unbounded growth)
+	private final List<String> failedQueue = new ArrayList<>();
 
 	@Override
 	protected void startUp()
@@ -59,26 +69,71 @@ public class RuneTraderPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
+		for (ScheduledFuture<?> timer : debounceTimers.values())
+		{
+			timer.cancel(false);
+		}
+		if (!pendingPayloads.isEmpty())
+		{
+			flushPending();
+		}
+		debounceTimers.clear();
+		pendingPayloads.clear();
 		scheduler.shutdown();
 		log.info("RuneTrader GE Sync stopped");
 	}
 
-	// ── Listen for GE offer changes ──────────────────────────
 	@Subscribe
 	public void onGrandExchangeOfferChanged(GrandExchangeOfferChanged event)
 	{
 		if (!isConfigured()) return;
 
+		int slot = event.getSlot();
 		var offer = event.getOffer();
+		var state = offer.getState();
 
-		// Skip EMPTY slots — nothing to sync
-		if (offer.getState() == net.runelite.api.GrandExchangeOfferState.EMPTY) return;
+		// Terminal states fire once and are semantically important — send immediately
+		boolean isTerminal = (state == net.runelite.api.GrandExchangeOfferState.BOUGHT
+			|| state == net.runelite.api.GrandExchangeOfferState.SOLD
+			|| state == net.runelite.api.GrandExchangeOfferState.CANCELLED_BUY
+			|| state == net.runelite.api.GrandExchangeOfferState.CANCELLED_SELL
+			|| state == net.runelite.api.GrandExchangeOfferState.EMPTY);
 
-		String json = buildOfferJson(event.getSlot(), offer);
-		sendSync("[" + json + "]");
+		String json;
+		if (state == net.runelite.api.GrandExchangeOfferState.EMPTY)
+		{
+			json = "{\"slot\":" + slot + ",\"status\":\"EMPTY\","
+				+ "\"itemId\":0,\"itemName\":\"\",\"offerType\":\"BUY\","
+				+ "\"offerPrice\":0,\"qtyTotal\":0,\"qtyFilled\":0,\"spent\":0}";
+		}
+		else
+		{
+			json = buildOfferJson(slot, offer);
+		}
+
+		if (isTerminal)
+		{
+			cancelDebounce(slot);
+			pendingPayloads.remove(slot);
+			sendSync("[" + json + "]");
+		}
+		else
+		{
+			// BUYING / SELLING: debounce rapid partial-fill ticks
+			pendingPayloads.put(slot, json);
+			cancelDebounce(slot);
+			ScheduledFuture<?> timer = scheduler.schedule(() -> {
+				String payload = pendingPayloads.remove(slot);
+				debounceTimers.remove(slot);
+				if (payload != null)
+				{
+					sendSync("[" + payload + "]");
+				}
+			}, DEBOUNCE_MS, TimeUnit.MILLISECONDS);
+			debounceTimers.put(slot, timer);
+		}
 	}
 
-	// ── Flush failed queue when player logs back in ──────────
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
@@ -94,30 +149,32 @@ public class RuneTraderPlugin extends Plugin
 		}
 	}
 
-	// ── Build JSON for a single offer ────────────────────────
 	private String buildOfferJson(int slot, net.runelite.api.GrandExchangeOffer offer)
 	{
-		// Map RuneLite's GrandExchangeOfferState to our API's expected values
-		String offerType  = (offer.getState() == net.runelite.api.GrandExchangeOfferState.BUYING
+		String offerType = (offer.getState() == net.runelite.api.GrandExchangeOfferState.BUYING
 			|| offer.getState() == net.runelite.api.GrandExchangeOfferState.BOUGHT
 			|| offer.getState() == net.runelite.api.GrandExchangeOfferState.CANCELLED_BUY)
 			? "BUY" : "SELL";
-		String status     = mapState(offer.getState());
-		String itemName   = getItemName(offer.getItemId());
+		String status   = mapState(offer.getState());
+		String itemName = getItemName(offer.getItemId());
+
+		int fillPrice = (offer.getQuantitySold() > 0)
+			? (int)(offer.getSpent() / offer.getQuantitySold())
+			: offer.getPrice();
 
 		return "{"
-			+ "\"slot\":"       + slot                      + ","
-			+ "\"itemId\":"     + offer.getItemId()          + ","
-			+ "\"itemName\":"   + jsonString(itemName)       + ","
-			+ "\"offerType\":" + jsonString(offerType)      + ","
-			+ "\"offerPrice\":" + offer.getPrice()           + ","
-			+ "\"qtyTotal\":"   + offer.getTotalQuantity()   + ","
-			+ "\"qtyFilled\":"  + offer.getQuantitySold()    + ","
-			+ "\"status\":"     + jsonString(status)
+			+ "\"slot\":" + slot + ","
+			+ "\"itemId\":" + offer.getItemId() + ","
+			+ "\"itemName\":" + jsonString(itemName) + ","
+			+ "\"offerType\":" + jsonString(offerType) + ","
+			+ "\"offerPrice\":" + fillPrice + ","
+			+ "\"spent\":" + offer.getSpent() + ","
+			+ "\"qtyTotal\":" + offer.getTotalQuantity() + ","
+			+ "\"qtyFilled\":" + offer.getQuantitySold() + ","
+			+ "\"status\":" + jsonString(status)
 			+ "}";
 	}
 
-	// ── Send to RuneTrader API ────────────────────────────────
 	private void sendSync(String jsonBody)
 	{
 		String apiKey = config.apiKey().trim();
@@ -136,27 +193,53 @@ public class RuneTraderPlugin extends Plugin
 			public void onFailure(Call call, IOException e)
 			{
 				log.warn("RuneTrader sync failed, queuing for retry: {}", e.getMessage());
-				failedQueue.add(jsonBody);
+				if (failedQueue.size() < MAX_QUEUE_SIZE)
+				{
+					failedQueue.add(jsonBody);
+				}
 			}
 
 			@Override
 			public void onResponse(Call call, Response response)
 			{
-				if (!response.isSuccessful())
+				try
 				{
-					log.warn("RuneTrader sync returned {}: queuing for retry", response.code());
-					// Don't retry 401 (bad key) — would loop forever
-					if (response.code() != 401)
+					if (!response.isSuccessful())
 					{
-						failedQueue.add(jsonBody);
+						log.warn("RuneTrader sync returned {}", response.code());
+						if (response.code() >= 500 && failedQueue.size() < MAX_QUEUE_SIZE)
+						{
+							failedQueue.add(jsonBody);
+						}
 					}
 				}
-				response.close();
+				finally
+				{
+					response.close();
+				}
 			}
 		});
 	}
 
-	// ── Map GrandExchangeOfferState to our API status strings ─
+	private void flushPending()
+	{
+		List<String> payloads = new ArrayList<>(pendingPayloads.values());
+		pendingPayloads.clear();
+		for (String p : payloads)
+		{
+			sendSync("[" + p + "]");
+		}
+	}
+
+	private void cancelDebounce(int slot)
+	{
+		ScheduledFuture<?> existing = debounceTimers.remove(slot);
+		if (existing != null)
+		{
+			existing.cancel(false);
+		}
+	}
+
 	private String mapState(net.runelite.api.GrandExchangeOfferState state)
 	{
 		switch (state)
@@ -171,23 +254,22 @@ public class RuneTraderPlugin extends Plugin
 		}
 	}
 
-	// ── Get item name from client cache ──────────────────────
 	private String getItemName(int itemId)
 	{
 		var composition = client.getItemDefinition(itemId);
 		return composition != null ? composition.getName() : "Unknown";
 	}
 
-	// ── Helpers ───────────────────────────────────────────────
 	private boolean isConfigured()
 	{
 		String key = config.apiKey();
-		return key != null && !key.trim().isEmpty() && key.startsWith("rt_");
+		return config.syncEnabled() && key != null && !key.trim().isEmpty() && key.startsWith("rt_");
 	}
 
 	private String jsonString(String value)
 	{
-		return "\"" + value.replace("\"", "\\\"") + "\"";
+		if (value == null) return "\"\"";
+		return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
 	}
 
 	@Provides

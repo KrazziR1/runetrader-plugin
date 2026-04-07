@@ -68,7 +68,7 @@ public class GESlotOverlay extends Overlay
 
 	private void renderPausedBanner(Graphics2D g)
 	{
-		Widget ge = client.getWidget(ComponentID.GRAND_EXCHANGE_WINDOW);
+		Widget ge = client.getWidget(ComponentID.GRAND_EXCHANGE_WINDOW_CONTAINER);
 		if (ge == null || ge.isHidden()) return;
 		Rectangle b = ge.getBounds();
 		if (b == null) return;
@@ -165,7 +165,7 @@ public class GESlotOverlay extends Overlay
 	private Widget getSlotWidget(int slot)
 	{
 		// GE slots sit inside widget group 465 (GrandExchangeWindow)
-		Widget ge = client.getWidget(ComponentID.GRAND_EXCHANGE_SLOT_CONTAINER);
+		Widget ge = client.getWidget(ComponentID.GRAND_EXCHANGE_SLOTS_CONTAINER);
 		if (ge == null) return null;
 		Widget[] children = ge.getChildren();
 		if (children == null || slot >= children.length) return null;

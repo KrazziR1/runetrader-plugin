@@ -165,7 +165,7 @@ public class GESlotOverlay extends Overlay
 	private Widget getSlotWidget(int slot)
 	{
 		// GE slots sit inside widget group 465 (GrandExchangeWindow)
-		Widget ge = client.getWidget(465, 0);
+		Widget ge = client.getWidget(ComponentID.GRAND_EXCHANGE_SLOT_CONTAINER);
 		if (ge == null) return null;
 		Widget[] children = ge.getChildren();
 		if (children == null || slot >= children.length) return null;

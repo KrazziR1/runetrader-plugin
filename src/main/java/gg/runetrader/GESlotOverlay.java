@@ -2,7 +2,7 @@ package gg.runetrader;
 
 import net.runelite.api.Client;
 import net.runelite.api.widgets.Widget;
-import net.runelite.api.widgets.WidgetInfo;
+import net.runelite.api.widgets.ComponentID;
 import net.runelite.client.ui.overlay.Overlay;
 import net.runelite.client.ui.overlay.OverlayLayer;
 import net.runelite.client.ui.overlay.OverlayPosition;
@@ -68,7 +68,7 @@ public class GESlotOverlay extends Overlay
 
 	private void renderPausedBanner(Graphics2D g)
 	{
-		Widget ge = client.getWidget(WidgetInfo.GRAND_EXCHANGE_WINDOW_CONTAINER);
+		Widget ge = client.getWidget(ComponentID.GRAND_EXCHANGE_WINDOW);
 		if (ge == null || ge.isHidden()) return;
 		Rectangle b = ge.getBounds();
 		if (b == null) return;
